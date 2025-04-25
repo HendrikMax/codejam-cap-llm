@@ -15,7 +15,7 @@
     "@sap/cds": "8.9.1",
     "@sap/cds-hana": "2",
     "cors": "2.8.5",
-    "dotenv": "16.4.7"
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "@sap/cds-dk": "8.9.1",
@@ -25,5 +25,12 @@
     "build_production": "cds build --production",
     "start": "cds-serve",
     "watch_hybrid": "cds watch --profile hybrid --livereload false"
+  },
+  "cds": {
+    "requires": {
+      "[hybrid]": {
+        "db": "hana"
+      }
+    }
   }
 }
