@@ -1,4 +1,4 @@
-import { OrchestrationClient, buildAzureContentFilter } from '@sap-ai-sdk/orchestration'
+import { OrchestrationClient, buildAzureContentSafetyFilter } from '@sap-ai-sdk/orchestration'
 
 import { AzureOpenAiEmbeddingClient } from '@sap-ai-sdk/langchain'
 
@@ -20,9 +20,9 @@ async function createVectorEmbeddings() {
     const document = await loader.load()
 
     const splitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 70,
-      chunkOverlap: 0,
-      addStartIndex: true,
+      chunkSize: 400, // Aim for ~400 characters/tokens
+      chunkOverlap: 50, // Include 50 chars of overlap to maintain context
+      separators: ['\n\n', '\n', '.', ' ', ''], // Recursive priority: break by paragraph > line > sentence > word > char
     })
 
     const splitDocuments = await splitter.splitDocuments(document)
@@ -62,13 +62,13 @@ async function orchestrateJobPostingCreation(user_query) {
       embedding
     )})) DESC`
 
-    let text_chunk = splits[0].text_chunk
+    let text_chunks = splits.slice(0, 3).map((split) => split.text_chunk)
 
-    const filter = buildAzureContentFilter({
-      Hate: 6,
-      Violence: 6,
-      Sexual: 6,
-      SelfHarm: 6,
+    const filter = buildAzureContentSafetyFilter({
+      Hate: 'ALLOW_SAFE',
+      Violence: 'ALLOW_SAFE',
+      SelfHarm: 'ALLOW_SAFE',
+      Sexual: 'ALLOW_SAFE',
     })
 
     const orchestrationClient = new OrchestrationClient(
@@ -80,20 +80,25 @@ async function orchestrateJobPostingCreation(user_query) {
         templating: {
           template: [
             {
+              role: 'system',
+              content: `You are an assistant for HR recruiter and manager.
+              You are receiving a user query to create a job posting for new hires.
+              Consider the given context when creating the job posting to include company relevant information like pay range and employee benefits.
+              Consider all the input before responding especially Recruiter information, Application deadline, Company Name, Location, Salary, Hiring Bonus and other benefits.`,
+            },
+            {
               role: 'user',
-              content:
-                ` You are an assistant for HR recruiter and manager.
-            You are receiving a user query to create a job posting for new hires.
-            Consider the given context when creating the job posting to include company relevant information like pay range and employee benefits.
-            The contact details for the recruiter are: Jane Doe, E-Mail: jane.doe@company.com .
-            Consider all the input before responding.
-            context: ${text_chunk}` + user_query,
+              content: `${user_query}, context information: ${text_chunks}`,
             },
           ],
         },
         filtering: {
-          input: filter,
-          output: filter,
+          input: {
+            filters: [filter],
+          },
+          output: {
+            filters: [filter],
+          },
         },
         masking: {
           masking_providers: [

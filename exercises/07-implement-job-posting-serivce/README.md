@@ -178,10 +178,10 @@ Within the file you need to import the orchestration client and the content filt
 👉 Add the following lines of code to the top of the file:
 
 ```JavaScript
-import {
-  OrchestrationClient,
-  buildAzureContentFilter
-} from '@sap-ai-sdk/orchestration';
+import { 
+  OrchestrationClient, 
+  buildAzureContentSafetyFilter 
+  } from '@sap-ai-sdk/orchestration'
 ```
 
 👉 To use CDS methods import CDS by adding the following line of code directly below the import statement:
@@ -249,10 +249,10 @@ let splits = await SELECT.from(DocumentChunks)
 
 The `cosine_similarity` call in the SQL statement is not the default SQL. This is an added function by the HANA Cloud Vector Engine.
 
-👉 Extract the first result from the list `splits`:
+👉 Extract the first three results from the list `splits`:
 
 ```JavaScript
-let text_chunk = splits[0].text_chunk;
+let text_chunks = splits.slice(0, 3).map((split) => split.text_chunk)
 ```
 
 You have all relevant information at hand to construct the template which is getting send to the chat model via the orchestration client.
@@ -260,49 +260,80 @@ You have all relevant information at hand to construct the template which is get
 👉 Now, create a new orchestration client, passing in the required LLM, template, and filter:
 
 ```JavaScript
-const filter = buildAzureContentFilter({
-      Hate: 6,
-      Violence: 6,
-      Sexual: 6,
-      SelfHarm: 6
-    });
+const filter = buildAzureContentSafetyFilter({
+      Hate: 'ALLOW_SAFE',
+      Violence: 'ALLOW_SAFE',
+      SelfHarm: 'ALLOW_SAFE',
+      Sexual: 'ALLOW_SAFE',
+    })
 
 const orchestrationClient = new OrchestrationClient(
-      {
-        llm: {
-          model_name: chatModelName,
-          model_params: { max_tokens: 1000, temperature: 0.1 }
+  {
+    llm: {
+      model_name: chatModelName,
+      model_params: { max_tokens: 1000, temperature: 0.1 },
+    },
+    templating: {
+      template: [
+        {
+          role: 'system',
+          content: `You are an assistant for HR recruiter and manager.
+          You are receiving a user query to create a job posting for new hires.
+          Consider the given context when creating the job posting to include company relevant information like pay range and employee benefits.
+          Consider all the input before responding.`,
         },
-        templating: {
-          template: [
-            {
-              role: 'user',
-              content:
-                ` You are an assistant for the HR recruiter and manager.
-            You receive a user query to create a job posting for new hires.
-            Consider the given context when creating the job posting to include company-relevant information like pay range and employee benefits.
-            The contact details for the recruiter are: Jane Doe, E-Mail: jane.doe@company.com .
-            Consider all the input before responding.
-            context: ${text_chunk}` + user_query
-            }
-          ]
+        {
+          role: 'user',
+          content: `QUESTION: ${user_query} CONTEXT: ${text_chunks}`,
         },
-        filtering: {
-          input: filter,
-          output: filter
-        }
+      ],
+    },
+    filtering: {
+      input: {
+        filters: [filter],
       },
-      { resourceGroup: resourceGroup }
-);
+      output: {
+        filters: [filter],
+      },
+    },
+    masking: {
+      masking_providers: [
+        {
+          type: 'sap_data_privacy_integration',
+          method: 'anonymization',
+          entities: [{ type: 'profile-email' }, { type: 'profile-person' }],
+        },
+      ],
+    },
+  },
+  { resourceGroup: resourceGroup }
+)
 ```
 
-A typical message to a chat model requires a couple of information. First of all, you need to specify if you are sending a user message or a system message. In your case, you are constructing a user message and you enhance the user message with additional contextual information and instructions. You add the user query to the instructions for the model to give a better response. To the user, this additional information is hidden so they can focus on their request.
+A typical message to a chat model requires a couple of information. First of all, you need to specify if you are sending a user message or a system message. In your case, you are constructing a system message with the general instructions for the LLM. You add the result of the cosine similarity search to the instructions for the model to give a better response. To the user, this additional information is hidden so they can focus on their request. The user query itself is being sent with the user profile to the LLM.
 
 The client is defined to connect to the `gpt-4o-mini` using a template describing what you want the chat model to do including the user query. Finally you define strict rules for the content filter. The service is not tolerating any inappropriate or discriminating language which is of utmost importance! Take a look at the official documentation to understand content filters and learn more about levels of severity: [Azure AI Content Filtering](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/content-filter?tabs=warning%2Cuser-prompt%2Cpython-new).
+
+The levels available are:
+
+- ALLOW_ALL
+- ALLOW_SAFE
+- ALLOW_SAFE_LOW
+- ALLOW_SAFE_LOW_Medium
 
 This helps you to prevent hateful speech, violent speech and other inappropriate input but also output from the model. This allows you to granularly define how content should be filtered and to what degree such language should be allowed.
 
 If the user query successfully runs through the content filter, the response will be **200**, in case the content filter catches a user query you should receive a **400**. When you are testing your service, you can change the filter values to see how it applies to different user query inputs.
+
+```bash
+HTTP Response: Request failed with status code 400
+{
+  "request_id": "8a707a92-7122-4c50-bc33-9f305e9028e6",
+  "code": 400,
+  "message": "Content filtered due to safety violations. Please modify the prompt and try again.",
+  "location": "Filtering Module - Input Filter",
+}
+```
 
 👉 Below the initialization of the orchestration client call the client's chat completion method:
 
@@ -333,60 +364,74 @@ async function orchestrateJobPostingCreation(user_query) {
     const embeddingClient = new AzureOpenAiEmbeddingClient({
       modelName: embeddingModelName,
       maxRetries: 0,
-      resourceGroup: resourceGroup
-    });
+      resourceGroup: resourceGroup,
+    })
 
-    let embedding = await embeddingClient.embedQuery(user_query);
-    let splits = await SELECT.from(DocumentChunks)
-      .orderBy`cosine_similarity(embedding, to_real_vector(${JSON.stringify(embedding)})) DESC`;
+    let embedding = await embeddingClient.embedQuery(user_query)
+    let splits = await SELECT.from(DocumentChunks).orderBy`cosine_similarity(embedding, to_real_vector(${JSON.stringify(
+      embedding
+    )})) DESC`
 
-    let text_chunk = splits[0].text_chunk;
+    let text_chunks = splits.slice(0, 3).map((split) => split.text_chunk)
 
-    const filter = buildAzureContentFilter({
-      Hate: 6,
-      Violence: 6,
-      Sexual: 6,
-      SelfHarm: 6
-    });
+    const filter = buildAzureContentSafetyFilter({
+      Hate: 'ALLOW_SAFE',
+      Violence: 'ALLOW_SAFE',
+      SelfHarm: 'ALLOW_SAFE',
+      Sexual: 'ALLOW_SAFE',
+    })
+
     const orchestrationClient = new OrchestrationClient(
       {
         llm: {
           model_name: chatModelName,
-          model_params: { max_tokens: 1000, temperature: 0.1 }
+          model_params: { max_tokens: 1000, temperature: 0.1 },
         },
         templating: {
           template: [
             {
+              role: 'system',
+              content: `You are an assistant for HR recruiter and manager.
+              You are receiving a user query to create a job posting for new hires.
+              Consider the given context when creating the job posting to include company relevant information like pay range and employee benefits.
+              Consider all the input before responding.`,
+            },
+            {
               role: 'user',
-              content:
-                ` You are an assistant for the HR recruiter and manager.
-            You are receiving a user query to create a job posting for new hires.
-            Consider the given context when creating the job posting to include company relevant information like pay range and employee benefits.
-            The contact details for the recruiter are: Jane Doe, E-Mail: jane.doe@company.com .
-            Consider all the input before responding.
-            context: ${text_chunk}` + user_query
-            }
-          ]
+              content: `QUESTION: ${user_query} CONTEXT: ${text_chunks}`,
+            },
+          ],
         },
         filtering: {
-          input: filter,
-          output: filter
-        }
+          input: {
+            filters: [filter],
+          },
+          output: {
+            filters: [filter],
+          },
+        },
+        masking: {
+          masking_providers: [
+            {
+              type: 'sap_data_privacy_integration',
+              method: 'anonymization',
+              entities: [{ type: 'profile-email' }, { type: 'profile-person' }],
+            },
+          ],
+        },
       },
       { resourceGroup: resourceGroup }
-    );
+    )
 
-    const response = await orchestrationClient.chatCompletion();
-    console.log(
-      `Successfully executed chat completion. ${response.getContent()}`
-    );
-    return [user_query, response.getContent()];
+    const response = await orchestrationClient.chatCompletion()
+    console.log(`Successfully executed chat completion. ${response.getContent()}`)
+    return [user_query, response.getContent()]
   } catch (error) {
     console.log(
       `Error while generating Job Posting.
       Error: ${error.response}`
-    );
-    throw error;
+    )
+    throw error
   }
 }
 ```
